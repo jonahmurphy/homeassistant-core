@@ -5,12 +5,19 @@ from __future__ import annotations
 from datetime import timedelta
 import logging
 from typing import Any
+from enum import Enum
+import base64
+import datetime
+import json
+import time
+import collections
+
 
 from pyephember.pyephember import (
     EphEmber,
     ZoneMode,
     zone_current_temperature,
-    zone_is_active,
+    #zone_is_active,
     zone_is_boost_active,
     zone_is_hot_water,
     zone_mode,
@@ -78,7 +85,126 @@ def setup_platform(
 
     return
 
+# New changes
+class ZoneMode(Enum):
+    """
+    Modes that a zone can be set too
+    """
+    # pylint: disable=invalid-name
+    AUTO = 0
+    ALL_DAY = 1
+    ON = 2
+    OFF = 3
+    
+def zone_is_active(zone):
+    """
+    Check if the zone is on.
+    This is a bit of a hack as the new API doesn't have a currently
+    active variable
+    """
+    _LOGGER.error("GOT zone: %s", zone)
+    # not sure how accurate the following tests are
+    if (zone_is_scheduled_on(zone) or zone_advance_active(zone)) and not zone_is_target_temperature_reached(zone):
+        return True
+    if zone_boost_hours(zone) > 0 and not zone_is_target_boost_temperature_reached(zone):
+        return True
 
+    return False
+  
+  
+def zone_is_target_temperature_reached(zone):
+    return zone_current_temperature(zone) >= zone_target_temperature(zone)
+
+def zone_is_target_boost_temperature_reached(zone):
+    return zone_boost_temperature(zone) >= zone_target_temperature(zone)
+    
+
+def zone_is_scheduled_on(zone):
+    """
+    Check if zone is scheduled to be on
+    """
+    mode = zone_mode(zone)
+    if mode == ZoneMode.OFF:
+        return False
+
+    if mode == ZoneMode.ON:
+        return True
+
+    def scheduletime_to_time(stime):
+        """
+        Convert from string time in format 12:30
+        to python datetime
+        """
+        time_str = '13::55::26'
+        return datetime.datetime.strptime(stime, '%H:%M').time()
+    
+    zone_tstamp = None
+    zone_ts_time = None
+    try:
+        zone_tstamp = time.gmtime(zone['timestamp']/1000)
+        zone_ts_time = datetime.time(zone_tstamp.tm_hour, zone_tstamp.tm_min)
+    except:
+        _LOGGER.error("Error getting timestamp from zone, using current times")
+        zone_tstamp = time.gmtime()
+        zone_ts_time = datetime.time(zone_tstamp.tm_hour, zone_tstamp.tm_min)
+  
+    for day in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']:
+        program = zone['programmes'][day]
+        if mode == ZoneMode.AUTO:
+            for period in ['p1', 'p2', 'p3']:
+                start_time = scheduletime_to_time(program[period]['starttime'])
+                end_time = scheduletime_to_time(program[period]['endtime'])
+                if start_time <= zone_ts_time <= end_time:
+                    return True
+        elif mode == ZoneMode.ALL_DAY:
+            start_time = scheduletime_to_time(program['p1']['starttime'])
+            end_time = scheduletime_to_time(program['p3']['endtime'])
+            if start_time <= zone_ts_time <= end_time:
+                return True
+    return False
+    
+def zone_boost_temperature(zone):
+    """
+    Get target temperature for this zone
+    """
+    boost_activation = _zone_boostactivation(zone)
+    if boost_activation is None:
+        return None
+    return boost_activation.get('targettemperature', None)  
+ 
+def zone_advance_active(zone):
+    """
+    Check if zone has advance active
+    """
+    return zone.get('isadvanceactive', False)
+
+
+def zone_boost_hours(zone):
+    """
+    Return zone boost hours
+    """
+    if not zone_is_boost_active(zone):
+        return 0
+    boost_activations = _zone_boostactivation(zone)
+    if not boost_activations:
+        return 0
+    return boost_activations.get('numberofhours', 0)
+
+def zone_boost_timestamp(zone):
+    """
+    Return zone boost hours
+    """
+    if not zone_is_boost_active(zone):
+        return None
+    boost_activations = _zone_boostactivation(zone)
+    if not boost_activations:
+        return None
+    return boost_activations.get('activatedon', None)
+    
+def _zone_boostactivation(zone):
+    return zone.get('boostActivations', None)
+
+    
 class EphEmberThermostat(ClimateEntity):
     """Representation of a EphEmber thermostat."""
 
@@ -114,6 +240,7 @@ class EphEmberThermostat(ClimateEntity):
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
+        _LOGGER.error("Testing JONAH")
         return zone_target_temperature(self._zone)
 
     @property
