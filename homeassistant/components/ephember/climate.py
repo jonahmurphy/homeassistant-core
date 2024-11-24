@@ -86,15 +86,6 @@ def setup_platform(
     return
 
 # New changes
-class ZoneMode(Enum):
-    """
-    Modes that a zone can be set too
-    """
-    # pylint: disable=invalid-name
-    AUTO = 0
-    ALL_DAY = 1
-    ON = 2
-    OFF = 3
     
 def zone_is_active(zone):
     """
@@ -102,7 +93,6 @@ def zone_is_active(zone):
     This is a bit of a hack as the new API doesn't have a currently
     active variable
     """
-    _LOGGER.error("GOT zone: %s", zone)
     # not sure how accurate the following tests are
     if (zone_is_scheduled_on(zone) or zone_advance_active(zone)) and not zone_is_target_temperature_reached(zone):
         return True
@@ -136,7 +126,9 @@ def zone_is_scheduled_on(zone):
         to python datetime
         """
         time_str = '13::55::26'
-        return datetime.datetime.strptime(stime, '%H:%M').time()
+        t =  datetime.datetime.strptime(stime, '%H:%M').time()
+        return t
+
     
     zone_tstamp = None
     zone_ts_time = None
@@ -144,12 +136,15 @@ def zone_is_scheduled_on(zone):
         zone_tstamp = time.gmtime(zone['timestamp']/1000)
         zone_ts_time = datetime.time(zone_tstamp.tm_hour, zone_tstamp.tm_min)
     except:
-        _LOGGER.error("Error getting timestamp from zone, using current times")
         zone_tstamp = time.gmtime()
         zone_ts_time = datetime.time(zone_tstamp.tm_hour, zone_tstamp.tm_min)
-  
-    for day in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']:
-        program = zone['programmes'][day]
+
+    days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+    today = days[zone_tstamp.tm_wday]
+    
+    program = zone['programmes'][today]
+
+    try:
         if mode == ZoneMode.AUTO:
             for period in ['p1', 'p2', 'p3']:
                 start_time = scheduletime_to_time(program[period]['starttime'])
@@ -161,6 +156,9 @@ def zone_is_scheduled_on(zone):
             end_time = scheduletime_to_time(program['p3']['endtime'])
             if start_time <= zone_ts_time <= end_time:
                 return True
+ 
+    except Exception as ex:
+        _LOGGER.error("Error deterimining if scheduled.. %s", ex)
     return False
     
 def zone_boost_temperature(zone):
@@ -240,7 +238,6 @@ class EphEmberThermostat(ClimateEntity):
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
-        _LOGGER.error("Testing JONAH")
         return zone_target_temperature(self._zone)
 
     @property
