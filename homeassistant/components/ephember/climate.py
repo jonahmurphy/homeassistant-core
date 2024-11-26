@@ -62,7 +62,7 @@ EPH_TO_HA_STATE = {
 }
 
 HA_STATE_TO_EPH = {value: key for key, value in EPH_TO_HA_STATE.items()}
-
+HYSTERISIS_THRESHOLD = 0.4 # celcius
 
 def setup_platform(
     hass: HomeAssistant,
@@ -86,28 +86,7 @@ def setup_platform(
     return
 
 # New changes
-    
-def zone_is_active(zone):
-    """
-    Check if the zone is on.
-    This is a bit of a hack as the new API doesn't have a currently
-    active variable
-    """
-    # not sure how accurate the following tests are
-    if (zone_is_scheduled_on(zone) or zone_advance_active(zone)) and not zone_is_target_temperature_reached(zone):
-        return True
-    if zone_boost_hours(zone) > 0 and not zone_is_target_boost_temperature_reached(zone):
-        return True
 
-    return False
-  
-  
-def zone_is_target_temperature_reached(zone):
-    return zone_current_temperature(zone) >= zone_target_temperature(zone)
-
-def zone_is_target_boost_temperature_reached(zone):
-    return zone_boost_temperature(zone) >= zone_target_temperature(zone)
-    
 
 def zone_is_scheduled_on(zone):
     """
@@ -202,6 +181,78 @@ def zone_boost_timestamp(zone):
 def _zone_boostactivation(zone):
     return zone.get('boostActivations', None)
 
+
+class BoilerState:
+    """
+    Attempt to calculate the boiler state since it isn't provided by the Ember APIs 
+    """
+    def __init__(self, zone):
+        self._zone_name = zone_name(zone)
+        self._last_hvac_action = None
+        self.SWITCHING_DIFFERENTIAL = 5 if zone_is_hot_water(zone) else 0.4
+        
+    def is_active(self, zone):
+        if self._last_hvac_action == HVACAction.IDLE:
+            return self._handle_idle_state(zone)
+        elif self._last_hvac_action == HVACAction.HEATING:
+            return self._handle_heating_state(zone)
+        return self._handle_init_state(zone)
+            
+    def _handle_init_state(self, zone):
+        _LOGGER.error("Last state INIT  for %s", self._zone_name)
+        if not self._is_switched_on(zone):
+            self._last_hvac_action = HVACAction.IDLE
+            return False            
+
+        if self._is_heating_activated(zone):
+            self._last_hvac_action = HVACAction.HEATING
+            return True
+        elif not self._target_temp_reached(zone):
+            # We don't know if the temperature if falling or rising
+            # so we can't be sure if the boiler is active or not..
+            # hence we stay in an INIT state until we are sure we've transitioned to idle.
+            # but since this is binary, we have to choose some state.. choose active
+            return True
+        else: # target temp is reached..
+            self._last_hvac_action = HVACAction.IDLE
+            return False
+        
+    def _handle_idle_state(self, zone):
+        _LOGGER.error("Last state IDLE for %s", self._zone_name)
+        if not self._is_switched_on(zone):
+            return False
+            
+        if self._is_heating_activated(zone):
+            self._last_hvac_action = HVACAction.HEATING
+            return True
+        return False
+    
+    def _handle_heating_state(self, zone):
+        _LOGGER.error("Last state HEATING for %s", self._zone_name)
+        if self._target_temp_reached(zone):
+            self._last_hvac_action = HVACAction.HEATING
+            return False
+        else:
+            return True
+        
+    def _target_temp_reached(self, zone):
+        if self._is_boost_active(zone):
+            return zone_current_temperature(zone) >= zone_boost_temperature(zone)
+        else:
+            return zone_current_temperature(zone) >= zone_target_temperature(zone)
+    
+    def _is_heating_activated(self, zone):
+        if self._is_boost_active(zone):
+            return zone_boost_temperature(zone)+self.SWITCHING_DIFFERENTIAL <= zone_boost_temperature(zone)
+        else:
+            return zone_current_temperature(zone)+self.SWITCHING_DIFFERENTIAL <= zone_target_temperature(zone)
+            
+    def _is_boost_active(self, zone):
+        return zone_boost_hours(zone) > 0
+        
+    def _is_switched_on(self, zone):
+        return zone_is_scheduled_on(zone) or zone_advance_active(zone) or self._is_boost_active(zone)
+
     
 class EphEmberThermostat(ClimateEntity):
     """Representation of a EphEmber thermostat."""
@@ -216,7 +267,7 @@ class EphEmberThermostat(ClimateEntity):
         self._zone_name = zone_name(zone)
         self._zone = zone
         self._hot_water = zone_is_hot_water(zone)
-
+        self._boiler_state = BoilerState(zone)
         self._attr_name = self._zone_name
 
         self._attr_supported_features = (
@@ -243,9 +294,8 @@ class EphEmberThermostat(ClimateEntity):
     @property
     def hvac_action(self) -> HVACAction:
         """Return current HVAC action."""
-        if zone_is_active(self._zone):
+        if self._boiler_state.is_active(self._zone):
             return HVACAction.HEATING
-
         return HVACAction.IDLE
 
     @property
